@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Icon Generator</title>
+</head>
+<body>
+    <h1>Icon Generator for MCP Copilot Extension</h1>
+    <p>This page helps you create icons for the Chrome extension.</p>
+    <canvas id="iconCanvas" width="128" height="128"></canvas>
+    <br>
+    <button onclick="generateIcons()">Generate Icons</button>
+    <script>
+        function generateIcons() {
+            const canvas = document.getElementById('iconCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Draw a simple robot icon
+            ctx.fillStyle = '#0e639c';
+            ctx.fillRect(0, 0, 128, 128);
+            
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '80px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🤖', 64, 64);
+            
+            // Download icons
+            const sizes = [16, 48, 128];
+            sizes.forEach(size => {
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = size;
+                tempCanvas.height = size;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(canvas, 0, 0, size, size);
+                
+                tempCanvas.toBlob(blob => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `icon${size}.png`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                });
+            });
+        }
+        
+        // Auto-generate on load
+        window.onload = () => {
+            generateIcons();
+            alert('Icons generated! Check your downloads folder. Move them to the icons/ directory.');
+        };
+    </script>
+</body>
+</html>
+
+

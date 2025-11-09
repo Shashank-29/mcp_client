@@ -1,0 +1,1 @@
+{"args":{"function":"() => { const sel = \"input[name='search_query']\"; const el = document.querySelector(sel); if (!el) return {status:'not-found'}; el.focus(); el.value = 'kids videos'; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); return {status:'typed'}; }"}}

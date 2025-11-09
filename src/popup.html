@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Copilot</title>
+  <style>
+    body {
+      width: 320px;
+      padding: 16px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1e1e1e;
+      color: #cccccc;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .icon {
+      font-size: 24px;
+    }
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #ffffff;
+    }
+    .status {
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+      font-size: 12px;
+    }
+    .status.connected {
+      background: #0e639c;
+      color: #ffffff;
+    }
+    .status.disconnected {
+      background: #3e3e3e;
+      color: #cccccc;
+    }
+    .button {
+      width: 100%;
+      padding: 10px;
+      background: #0e639c;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-bottom: 8px;
+      transition: background 0.2s;
+    }
+    .button:hover {
+      background: #1177bb;
+    }
+    .button:disabled {
+      background: #3e3e3e;
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    .info {
+      font-size: 12px;
+      color: #858585;
+      margin-top: 16px;
+      line-height: 1.5;
+    }
+    .section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #3e3e3e;
+    }
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #ffffff;
+      margin-bottom: 8px;
+    }
+    .input {
+      width: 100%;
+      padding: 8px;
+      background: #2d2d30;
+      border: 1px solid #3e3e3e;
+      border-radius: 4px;
+      color: #cccccc;
+      font-size: 12px;
+      margin-bottom: 8px;
+      box-sizing: border-box;
+    }
+    .input:focus {
+      outline: none;
+      border-color: #0e639c;
+    }
+    .input::placeholder {
+      color: #858585;
+    }
+    .status.gemini {
+      background: #2d2d30;
+      margin-bottom: 8px;
+    }
+    .status.gemini.configured {
+      background: #0e639c;
+      color: #ffffff;
+    }
+    .link {
+      color: #0e639c;
+      text-decoration: none;
+    }
+    .link:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="icon">🤖</div>
+    <div class="title">MCP Copilot</div>
+  </div>
+  
+  <div class="status disconnected" id="status">
+    Disconnected
+  </div>
+  <button class="button" id="connect-btn">Connect to MCP Server</button>
+  
+  <div class="section">
+    <div class="section-title">Gemini AI Agent</div>
+    <div class="status gemini" id="gemini-status">
+      Not configured
+    </div>
+    <input type="password" class="input" id="api-key-input" placeholder="Enter your Gemini API key">
+    <button class="button" id="save-api-key-btn">Save API Key</button>
+    <div class="info" style="margin-top: 8px;">
+      Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank" class="link">Google AI Studio</a>
+    </div>
+  </div>
+  
+  <button class="button" id="toggle-chat-btn">Toggle Chat UI</button>
+  <div class="info">
+    Press <strong>Cmd+Shift+K</strong> (Mac) or <strong>Ctrl+Shift+K</strong> (Windows/Linux) to toggle the chat UI on any page.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+

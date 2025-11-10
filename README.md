@@ -7,6 +7,7 @@ A Chrome extension that mimics the VS Code GitHub Copilot chat agent with Playwr
 - 🤖 **Gemini AI Agent**: Intelligent natural language processing using Google's Gemini AI
 - 💬 **Chat Interface**: GitHub Copilot-style chat UI that appears on any webpage
 - 🎭 **Playwright MCP Integration**: Full integration with Playwright MCP server for browser automation
+- 🔗 **CDP Support**: Connect to existing Chrome profile via Chrome DevTools Protocol (CDP)
 - 🧠 **Intelligent Tool Selection**: Gemini AI automatically selects the right Playwright tools
 - 📸 **Screenshot Capture**: Take screenshots of web pages
 - 🔍 **Page Analysis**: Analyze page structure and accessibility
@@ -14,6 +15,7 @@ A Chrome extension that mimics the VS Code GitHub Copilot chat agent with Playwr
 - 🚀 **Navigation**: Navigate to URLs and control browser behavior
 - 🔗 **Multi-step Tasks**: Chain multiple tool calls for complex automation
 - ⌨️ **Keyboard Shortcuts**: Toggle chat with `Cmd+Shift+K` (Mac) or `Ctrl+Shift+K` (Windows/Linux)
+- 🎯 **Existing Chrome Profile**: Use your current Chrome with extensions and logged-in sessions
 
 ## Architecture
 
@@ -300,15 +302,54 @@ The bridge server includes CORS headers, but if you encounter CORS issues:
 2. Verify the port matches in both extension and server
 3. Check browser console for specific CORS error messages
 
+## CDP Support (Use Existing Chrome Profile)
+
+The extension now supports connecting to your existing Chrome instance via Chrome DevTools Protocol (CDP). This allows you to:
+
+- ✅ Use your existing Chrome profile
+- ✅ Access all Chrome extensions
+- ✅ Use logged-in sessions
+- ✅ Share cookies and storage
+- ✅ Operate in your current Chrome window
+
+### Quick Setup
+
+1. **Start Chrome with remote debugging:**
+   ```bash
+   # macOS
+   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+   
+   # Linux
+   google-chrome --remote-debugging-port=9222
+   
+   # Windows
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+   ```
+
+2. **Start the bridge server:**
+   ```bash
+   npm run server
+   ```
+
+3. **The extension will automatically detect and connect to your Chrome**
+
+For detailed setup instructions, see [CHROME_CDP_SETUP.md](./CHROME_CDP_SETUP.md)
+
+For implementation details, see [CDP_IMPLEMENTATION.md](./CDP_IMPLEMENTATION.md) and [CDP_CHANGES_SUMMARY.md](./CDP_CHANGES_SUMMARY.md)
+
 ## Limitations
 
+- **Without CDP:** Browser automation runs in a separate Playwright instance (not the current Chrome tab)
+- **With CDP:** Uses your existing Chrome profile (recommended) - see CDP Support above
+- Some Playwright features may have lower fidelity when using CDP compared to native Playwright protocol
 - Requires the bridge server to be running locally
-- Browser automation runs in a separate Playwright instance (not the current Chrome tab)
-- Some Playwright features may not work exactly as in the user's browser context
 
 ## Future Improvements
 
-- [ ] Add AI model integration for better intent detection
+- [x] CDP support for existing Chrome profile (✅ Completed)
+- [ ] Auto-start Chrome with remote debugging
+- [ ] Support for multiple Chrome instances
+- [ ] Enhanced connection monitoring
 - [ ] Support for multiple MCP servers
 - [ ] Persistent chat history across sessions
 - [ ] Custom tool definitions

@@ -12,6 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import GeminiAgent from './gemini-agent.js';
 import logger from './logger.js';
+import PlaywrightCDPHandler from './playwright-cdp-handler.js';
 
 // Load .env file into process.env if present (simple, no dependency)
 try {
@@ -54,8 +55,109 @@ let mcpClient = null;
 let mcpTransport = null;
 let isConnected = false;
 let geminiAgent = null;
+let playwrightCDP = null; // CDP handler for existing Chrome instance
 // In-memory session store for live session updates
 const sessions = {};
+
+/**
+ * Check if Chrome is running with remote debugging enabled
+ * Returns the CDP endpoint URL if found, null otherwise
+ */
+async function findChromeCDPEndpoint() {
+  const possiblePorts = [9222, 9223, 9224, 9225];
+  
+  for (const port of possiblePorts) {
+    try {
+      const response = await fetch(`http://localhost:${port}/json/version`, {
+        signal: AbortSignal.timeout(500), // 500ms timeout
+      });
+      if (response.ok) {
+        const data = await response.json();
+        logger.info(`✅ Found Chrome CDP endpoint on port ${port}`);
+        return `http://localhost:${port}`;
+      }
+    } catch (e) {
+      // Port not available, try next
+      continue;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Create MCP client wrapper that routes browser operations to CDP handler when available
+ */
+function createMCPClientWrapper() {
+  return {
+    listTools: async () => {
+      if (!mcpClient) {
+        throw new Error('MCP client not connected');
+      }
+      const response = await mcpClient.listTools();
+      return response.tools || [];
+    },
+    callTool: async (request) => {
+      try { logger.info('Gemini->MCP callTool', safeStringify(request, 1000)); } catch (e) {}
+      
+      // If CDP handler is available and this is a browser tool, use CDP
+      if (playwrightCDP && playwrightCDP.isConnectedToBrowser()) {
+        const toolName = request.name;
+        const args = request.arguments || {};
+        const browserTools = [
+          'browser_navigate', 'browser_goto', 'playwright_navigate', 'playwright_goto',
+          'browser_screenshot', 'playwright_screenshot',
+          'browser_click', 'playwright_click',
+          'browser_fill', 'browser_type', 'playwright_fill', 'playwright_type',
+          'browser_evaluate', 'playwright_evaluate',
+          'browser_accessibility_snapshot', 'playwright_accessibility_snapshot',
+          'browser_wait_for', 'playwright_wait_for',
+        ];
+
+        if (browserTools.some(tool => toolName.includes(tool) || tool.includes(toolName))) {
+          try {
+            logger.info(`Gemini->CDP callTool: ${toolName}`);
+            let result;
+
+            if (toolName.includes('navigate') || toolName.includes('goto')) {
+              result = await playwrightCDP.navigate(args.url || args.href, args.pageId);
+            } else if (toolName.includes('screenshot')) {
+              const screenshot = await playwrightCDP.screenshot(args, args.pageId);
+              result = { screenshot, format: 'base64' };
+            } else if (toolName.includes('click')) {
+              result = await playwrightCDP.click(args.selector || args.ref, args, args.pageId);
+            } else if (toolName.includes('fill')) {
+              result = await playwrightCDP.fill(args.selector || args.ref, args.text || args.value, args, args.pageId);
+            } else if (toolName.includes('type')) {
+              result = await playwrightCDP.type(args.selector || args.ref, args.text, args, args.pageId);
+            } else if (toolName.includes('evaluate')) {
+              result = await playwrightCDP.evaluate(args.function || args.script, args.pageId);
+            } else if (toolName.includes('accessibility') || toolName.includes('snapshot')) {
+              result = await playwrightCDP.getAccessibilitySnapshot(args.pageId);
+            } else if (toolName.includes('wait')) {
+              result = await playwrightCDP.waitForSelector(args.selector || args.ref, args, args.pageId);
+            } else {
+              throw new Error('Tool not handled by CDP');
+            }
+
+            try { logger.debug('Gemini->CDP callTool result', safeStringify(result, 2000)); } catch (e) {}
+            return result;
+          } catch (cdpError) {
+            logger.warn(`CDP handler failed for ${toolName}, falling back to MCP:`, cdpError.message);
+          }
+        }
+      }
+
+      // Fall back to MCP server
+      if (!mcpClient) {
+        throw new Error('MCP client not connected');
+      }
+      const resp = await mcpClient.callTool(request);
+      try { logger.debug('Gemini->MCP callTool result', safeStringify(resp, 2000)); } catch (e) {}
+      return resp;
+    },
+  };
+}
 
 function makeSession() {
   const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : require('crypto').randomBytes(8).toString('hex');
@@ -74,9 +176,55 @@ async function connectToMCP() {
   }
 
   try {
+    // Try to find Chrome CDP endpoint if not explicitly set
+    let cdpEndpoint = process.env.CHROME_CDP_ENDPOINT;
+    const useExistingBrowser = process.env.USE_EXISTING_BROWSER !== 'false'; // Default to true
+    
+    // Try to find and connect to existing Chrome via CDP first
+    if (useExistingBrowser) {
+      logger.info('🔍 Searching for Chrome CDP endpoint...');
+      cdpEndpoint = await findChromeCDPEndpoint();
+      
+      if (cdpEndpoint) {
+        // Initialize CDP handler for existing Chrome
+        try {
+          playwrightCDP = new PlaywrightCDPHandler(cdpEndpoint);
+          await playwrightCDP.connect();
+          logger.info('✅ Connected to existing Chrome via CDP');
+          logger.info('📌 Will use existing Chrome profile for browser operations');
+          
+          // Still connect to MCP server for tool definitions, but we'll intercept browser calls
+          logger.info('🔗 Connecting to Playwright MCP server for tool definitions...');
+        } catch (cdpError) {
+          logger.warn('⚠️  Failed to connect via CDP:', cdpError.message);
+          logger.warn('   Falling back to MCP server (will launch new browser)...');
+          playwrightCDP = null;
+          cdpEndpoint = null;
+        }
+      } else {
+        logger.warn('⚠️  Chrome remote debugging not found. Make sure Chrome is running with:');
+        logger.warn('   macOS: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222');
+        logger.warn('   Linux: google-chrome --remote-debugging-port=9222');
+        logger.warn('   Windows: chrome.exe --remote-debugging-port=9222');
+        logger.warn('   Or set CHROME_CDP_ENDPOINT environment variable');
+        logger.warn('   Falling back to MCP server (will launch new browser)...');
+        playwrightCDP = null;
+      }
+    }
+    
+    // Set environment variables for Playwright MCP (if not using CDP)
+    const env = {
+      ...process.env,
+    };
+
+    if (!playwrightCDP) {
+      logger.info('🚀 Playwright MCP will launch a new browser instance');
+    }
+
     mcpTransport = new StdioClientTransport({
       command: 'npx',
       args: ['-y', '@playwright/mcp@latest'],
+      env: env,
     });
 
     mcpClient = new Client(
@@ -97,6 +245,14 @@ async function connectToMCP() {
     
     isConnected = true;
     logger.info('✅ Connected to Playwright MCP server');
+    
+    // Note: The Playwright MCP server may need to be configured to use CDP.
+    // If it's still launching a new browser, check the Playwright MCP documentation
+    // or consider using a custom Playwright script that connects via CDP.
+    if (useExistingBrowser && cdpEndpoint) {
+      logger.info('💡 Tip: If Playwright still launches a new browser, the MCP server may need');
+      logger.info('   additional configuration. See CHROME_CDP_SETUP.md for details.');
+    }
 
     // Auto-initialize Gemini agent from environment variable if provided.
     // This keeps the agent available across extension reloads when the bridge
@@ -105,19 +261,7 @@ async function connectToMCP() {
       const envKey = process.env.GEMINI_API_KEY;
       if (envKey && !geminiAgent) {
         logger.info('Auto-initializing Gemini agent from GEMINI_API_KEY environment variable');
-        const mcpClientWrapper = {
-          listTools: async () => {
-            const response = await mcpClient.listTools();
-            return response.tools || [];
-          },
-          callTool: async (request) => {
-            try { logger.info('Gemini->MCP callTool', safeStringify(request, 1000)); } catch (e) {}
-            const resp = await mcpClient.callTool(request);
-            try { logger.debug('Gemini->MCP callTool result', safeStringify(resp, 2000)); } catch (e) {}
-            return resp;
-          },
-        };
-
+        const mcpClientWrapper = createMCPClientWrapper();
         geminiAgent = new GeminiAgent(envKey, mcpClientWrapper);
         const initialized = await geminiAgent.initialize();
         if (initialized) logger.info('Gemini agent initialized from environment variable');
@@ -188,16 +332,68 @@ app.get('/mcp/tools', async (req, res) => {
 // Call tool
 app.post('/mcp/tools/:toolName', async (req, res) => {
   try {
+    const { toolName } = req.params;
+    const args = req.body.args || {};
+    
+    // Log incoming tool call (truncate large payloads)
+    logger.info(`MCP call requested: ${toolName}`, safeStringify(args, 1000));
+
+    // If we have a CDP handler and this is a browser operation, use CDP instead of MCP
+    if (playwrightCDP && playwrightCDP.isConnectedToBrowser()) {
+      const browserTools = [
+        'browser_navigate', 'browser_goto', 'playwright_navigate', 'playwright_goto',
+        'browser_screenshot', 'playwright_screenshot',
+        'browser_click', 'playwright_click',
+        'browser_fill', 'browser_type', 'playwright_fill', 'playwright_type',
+        'browser_evaluate', 'playwright_evaluate',
+        'browser_accessibility_snapshot', 'playwright_accessibility_snapshot',
+        'browser_wait_for', 'playwright_wait_for',
+      ];
+
+      if (browserTools.some(tool => toolName.includes(tool) || tool.includes(toolName))) {
+        try {
+          logger.info(`Using CDP handler for: ${toolName}`);
+          let result;
+
+          // Route to CDP handler based on tool name
+          if (toolName.includes('navigate') || toolName.includes('goto')) {
+            result = await playwrightCDP.navigate(args.url || args.href, args.pageId);
+          } else if (toolName.includes('screenshot')) {
+            const screenshot = await playwrightCDP.screenshot(args, args.pageId);
+            result = { screenshot, format: 'base64' };
+          } else if (toolName.includes('click')) {
+            result = await playwrightCDP.click(args.selector || args.ref, args, args.pageId);
+          } else if (toolName.includes('fill')) {
+            result = await playwrightCDP.fill(args.selector || args.ref, args.text || args.value, args, args.pageId);
+          } else if (toolName.includes('type')) {
+            result = await playwrightCDP.type(args.selector || args.ref, args.text, args, args.pageId);
+          } else if (toolName.includes('evaluate')) {
+            result = await playwrightCDP.evaluate(args.function || args.script, args.pageId);
+          } else if (toolName.includes('accessibility') || toolName.includes('snapshot')) {
+            result = await playwrightCDP.getAccessibilitySnapshot(args.pageId);
+          } else if (toolName.includes('wait')) {
+            result = await playwrightCDP.waitForSelector(args.selector || args.ref, args, args.pageId);
+          } else {
+            // Fall through to MCP server
+            throw new Error('Tool not handled by CDP, using MCP server');
+          }
+
+          logger.debug(`CDP call result: ${toolName}`, safeStringify(result, 2000));
+          return res.json({ success: true, result });
+        } catch (cdpError) {
+          // If CDP fails, fall back to MCP server
+          logger.warn(`CDP handler failed for ${toolName}, falling back to MCP:`, cdpError.message);
+        }
+      }
+    }
+
+    // Fall back to MCP server if CDP is not available or tool is not a browser operation
     if (!isConnected) {
       await connectToMCP();
     }
     if (!isConnected || !mcpClient) {
       return res.status(500).json({ success: false, error: 'Not connected to MCP server' });
     }
-    const { toolName } = req.params;
-    const args = req.body.args || {};
-    // Log incoming tool call (truncate large payloads)
-    logger.info(`MCP call requested: ${toolName}`, safeStringify(args, 1000));
 
     const response = await mcpClient.callTool({
       name: toolName,
@@ -221,6 +417,11 @@ app.post('/mcp/tools/:toolName', async (req, res) => {
 // Disconnect
 app.post('/mcp/disconnect', async (req, res) => {
   try {
+    if (playwrightCDP && playwrightCDP.isConnectedToBrowser()) {
+      await playwrightCDP.disconnect();
+    }
+    playwrightCDP = null;
+    
     if (mcpClient) {
       await mcpClient.close();
     }
@@ -252,21 +453,8 @@ app.post('/gemini/initialize', async (req, res) => {
       return res.status(500).json({ success: false, error: 'MCP server not connected' });
     }
 
-    // Create MCP client wrapper for Gemini agent (adds logging around calls)
-    const mcpClientWrapper = {
-      listTools: async () => {
-        const response = await mcpClient.listTools();
-        return response.tools || [];
-      },
-      callTool: async (request) => {
-        try {
-          logger.info('Gemini->MCP callTool', safeStringify(request, 1000));
-        } catch (e) {}
-        const resp = await mcpClient.callTool(request);
-        try { logger.debug('Gemini->MCP callTool result', safeStringify(resp, 2000)); } catch(e){}
-        return resp;
-      },
-    };
+    // Create MCP client wrapper for Gemini agent (routes to CDP when available)
+    const mcpClientWrapper = createMCPClientWrapper();
 
     // Initialize Gemini agent
     geminiAgent = new GeminiAgent(apiKey, mcpClientWrapper);
@@ -323,6 +511,16 @@ app.post('/gemini/chat', async (req, res) => {
     }
 
     const response = await geminiAgent.processMessage(message, context || {});
+    
+    // Ensure response is not empty before sending
+    if (!response || (typeof response === 'string' && response.trim() === '')) {
+      logger.warn('[Bridge Server] Empty response from Gemini agent, using fallback');
+      return res.json({ 
+        success: true, 
+        response: 'I received your message, but the response was empty. Please try again or check if the Gemini API is configured correctly.' 
+      });
+    }
+    
     res.json({ success: true, response });
   } catch (error) {
     logger.error('Error in Gemini chat:', error && (error.message || error));
@@ -386,19 +584,7 @@ app.post('/gemini/update-api-key', async (req, res) => {
         return res.status(500).json({ success: false, error: 'MCP server not connected' });
       }
 
-      const mcpClientWrapper = {
-        listTools: async () => {
-          const response = await mcpClient.listTools();
-          return response.tools || [];
-        },
-        callTool: async (request) => {
-          try { logger.info('Gemini->MCP callTool', safeStringify(request, 1000)); } catch(e){}
-          const resp = await mcpClient.callTool(request);
-          try { logger.debug('Gemini->MCP callTool result', safeStringify(resp, 2000)); } catch(e){}
-          return resp;
-        },
-      };
-
+      const mcpClientWrapper = createMCPClientWrapper();
       geminiAgent = new GeminiAgent(apiKey, mcpClientWrapper);
       await geminiAgent.initialize();
     } else {

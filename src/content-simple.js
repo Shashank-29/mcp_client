@@ -159,12 +159,32 @@ function setupChatListeners(container) {
   // Process message
   processMessage(message, useAutoSession).then(response => {
       thinkingMsg.remove();
+      
+      // Validate response is not empty
+      let responseText = response;
+      if (!responseText || (typeof responseText === 'string' && responseText.trim() === '')) {
+        responseText = 'I received your message, but the response was empty. Please try again or check if the MCP bridge server is running correctly.';
+      }
+      
       const responseMsg = document.createElement('div');
       responseMsg.className = 'chat-message chat-message-assistant';
+      const formattedContent = formatMessage(responseText);
+      
+      // Double-check formatted content is not empty
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      contentDiv.innerHTML = formattedContent;
+      
+      // Verify content was populated
+      if (!contentDiv.textContent || contentDiv.textContent.trim() === '') {
+        contentDiv.innerHTML = '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+      }
+      
       responseMsg.innerHTML = `
         <div class="message-avatar">🤖</div>
-        <div class="message-content">${formatMessage(response)}</div>
       `;
+      responseMsg.appendChild(contentDiv);
+      
       messagesContainer.appendChild(responseMsg);
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }).catch(error => {
@@ -228,13 +248,55 @@ function getSuggestionText(action) {
 }
 
 function formatMessage(text) {
-  if (text === undefined || text === null) text = '';
-  return String(text)
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+  // Handle empty or null content
+  if (text === undefined || text === null) {
+    return '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+  }
+  
+  const textStr = String(text);
+  if (textStr.trim() === '') {
+    return '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+  }
+  
+  // Format markdown: process code blocks first, then inline code, then bold/italic, then newlines
+  // First, protect code blocks from markdown processing
+  const codeBlockPlaceholder = '___CODE_BLOCK___';
+  const codeBlocks = [];
+  let processed = textStr.replace(/```([\s\S]*?)```/g, (match, code) => {
+    const placeholder = `${codeBlockPlaceholder}${codeBlocks.length}___`;
+    codeBlocks.push(`<pre><code>${code}</code></pre>`);
+    return placeholder;
+  });
+  
+  // Process inline code
+  const inlineCodePlaceholder = '___INLINE_CODE___';
+  const inlineCodes = [];
+  processed = processed.replace(/`([^`]+)`/g, (match, code) => {
+    const placeholder = `${inlineCodePlaceholder}${inlineCodes.length}___`;
+    inlineCodes.push(`<code>${code}</code>`);
+    return placeholder;
+  });
+  
+  // Process bold (must come before italic)
+  processed = processed.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  
+  // Process italic (single asterisk)
+  processed = processed.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+  
+  // Restore code blocks and inline code
+  codeBlocks.forEach((block, idx) => {
+    processed = processed.replace(`${codeBlockPlaceholder}${idx}___`, block);
+  });
+  inlineCodes.forEach((code, idx) => {
+    processed = processed.replace(`${inlineCodePlaceholder}${idx}___`, code);
+  });
+  
+  // Process horizontal rules and newlines
+  let formatted = processed
+    .replace(/^---$/gm, '<hr>')
     .replace(/\n/g, '<br>');
+  
+  return formatted;
 }
 
 // Process message
@@ -263,12 +325,24 @@ async function processMessage(message, autoSession = false) {
       if (response.session) {
           // If background session started, response contains sessionId to poll
           if (response.sessionId) {
+            const container = chatContainer || document.getElementById('mcp-copilot-chat');
             startSessionPoll(response.sessionId, container);
             return `Session started (id=${response.sessionId}). Tracking progress...`;
           }
-          return response.session.message || JSON.stringify(response.session);
+          const sessionMsg = response.session.message || JSON.stringify(response.session);
+          // Ensure session message is not empty
+          if (!sessionMsg || (typeof sessionMsg === 'string' && sessionMsg.trim() === '')) {
+            return 'Session started. Processing your request...';
+          }
+          return sessionMsg;
       }
-      return response.response;
+      
+      // Ensure response is not empty
+      const responseText = response.response;
+      if (!responseText || (typeof responseText === 'string' && responseText.trim() === '')) {
+        return 'I received your message, but the response was empty. Please try again.';
+      }
+      return responseText;
     } else {
       throw new Error(response.error || 'Unknown error');
     }
@@ -276,6 +350,32 @@ async function processMessage(message, autoSession = false) {
     console.error('Error processing message:', error);
     return `Error: ${error.message}. Make sure the MCP bridge server is running and Gemini API key is configured.`;
   }
+}
+
+// Clean up any empty message bubbles in the DOM
+function cleanupEmptyMessages() {
+  const container = chatContainer || document.getElementById('mcp-copilot-chat');
+  if (!container) return;
+  
+  const messagesContainer = container.querySelector('#chat-messages');
+  if (!messagesContainer) return;
+  
+  const messageElements = messagesContainer.querySelectorAll('.chat-message');
+  messageElements.forEach(msgEl => {
+    const contentDiv = msgEl.querySelector('.message-content');
+    if (contentDiv) {
+      const textContent = contentDiv.textContent || '';
+      const innerHTML = contentDiv.innerHTML || '';
+      // Check if content is effectively empty
+      if (textContent.trim() === '' && innerHTML.trim() === '') {
+        // Remove empty message bubbles
+        msgEl.remove();
+      } else if (textContent.trim() === '' && innerHTML.includes('(empty message)')) {
+        // Replace placeholder with helpful message
+        contentDiv.innerHTML = '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+      }
+    }
+  });
 }
 
 // Show chat
@@ -289,6 +389,11 @@ function showChat() {
   chatContainer.classList.remove('minimized');
   isChatVisible = true;
   
+  // Clean up empty messages when showing
+  setTimeout(() => {
+    cleanupEmptyMessages();
+  }, 50);
+  
   // Focus input
   setTimeout(() => {
     const input = chatContainer.querySelector('#chat-input');
@@ -298,7 +403,14 @@ function showChat() {
 
 // Poll session status and update the chat UI with live steps
 function startSessionPoll(sessionId, container) {
+  if (!container) {
+    container = chatContainer || document.getElementById('mcp-copilot-chat');
+  }
+  if (!container) return;
+  
   const messagesContainer = container.querySelector('#chat-messages');
+  if (!messagesContainer) return;
+  
   let statusMsg = document.createElement('div');
   statusMsg.className = 'chat-message chat-message-assistant';
   statusMsg.id = `session-${sessionId}`;
@@ -313,15 +425,53 @@ function startSessionPoll(sessionId, container) {
       const s = j.session;
       const trace = s.trace || [];
       const last = trace.length ? trace[trace.length-1] : null;
-      const content = last ? `Iteration ${last.iteration}: ${last.tool} ${last.args ? JSON.stringify(last.args) : ''}` : `Status: ${s.status}`;
-      statusMsg.querySelector('.message-content').innerHTML = content;
+      let content = last ? `Iteration ${last.iteration}: ${last.tool} ${last.args ? JSON.stringify(last.args) : ''}` : `Status: ${s.status}`;
+      
+      // Ensure content is not empty
+      if (!content || content.trim() === '') {
+        content = `Status: ${s.status}`;
+      }
+      
+      const contentEl = statusMsg.querySelector('.message-content');
+      if (contentEl) {
+        contentEl.innerHTML = formatMessage(content);
+        // Verify content was populated
+        if (!contentEl.textContent || contentEl.textContent.trim() === '') {
+          contentEl.innerHTML = '<span style="opacity: 0.6;">Processing...</span>';
+        }
+      }
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
       if (s.status === 'finished' || s.status === 'error') {
         clearInterval(iv);
-        const final = s.result || s.error || 'Session ended';
+        let final = s.result || s.error || 'Session ended';
+        
+        // Ensure final is not empty
+        if (final && typeof final === 'object') {
+          const stringified = JSON.stringify(final);
+          if (stringified === '{}' || stringified === '[]' || stringified.trim() === '') {
+            final = s.status === 'finished' ? 'Task completed successfully.' : 'Task ended with an error.';
+          } else {
+            final = stringified;
+          }
+        } else if (!final || (typeof final === 'string' && final.trim() === '')) {
+          final = s.status === 'finished' ? 'Task completed successfully.' : 'Task ended with an error.';
+        }
+        
         const finalMsg = document.createElement('div');
         finalMsg.className = 'chat-message chat-message-assistant';
-        finalMsg.innerHTML = `<div class="message-avatar">✅</div><div class="message-content">${formatMessage(JSON.stringify(final))}</div>`;
+        const formattedFinal = formatMessage(final);
+        
+        // Verify content is not empty
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.innerHTML = formattedFinal;
+        
+        if (!contentDiv.textContent || contentDiv.textContent.trim() === '') {
+          contentDiv.innerHTML = '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+        }
+        
+        finalMsg.innerHTML = `<div class="message-avatar">${s.status === 'finished' ? '✅' : '❌'}</div>`;
+        finalMsg.appendChild(contentDiv);
         messagesContainer.appendChild(finalMsg);
         statusMsg.remove();
       }
@@ -396,6 +546,12 @@ function initializeChat() {
   try {
     // Create container (but keep it hidden)
     createChatContainer();
+    
+    // Clean up any empty messages after a short delay
+    setTimeout(() => {
+      cleanupEmptyMessages();
+    }, 200);
+    
     postLog('info', '[MCP Copilot] Content script loaded and chat container created');
     postLog('info', '[MCP Copilot] Chat is ready. Use Cmd+Shift+K to toggle or click extension button.');
   } catch (error) {

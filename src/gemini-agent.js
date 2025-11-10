@@ -284,7 +284,14 @@ Follow these rules strictly so the bridge can reliably execute and iterate on yo
       }
 
       const text = data.candidates[0].content.parts[0].text;
-      return text.trim();
+      const trimmedText = text ? text.trim() : '';
+      
+      // If response is empty, log warning but don't throw - let caller handle it
+      if (!trimmedText) {
+        logger.warn('[Gemini Agent] Gemini API returned empty text response');
+      }
+      
+      return trimmedText;
     } catch (error) {
       logger.error('Error calling Gemini API:', error);
       throw error;
@@ -296,10 +303,24 @@ Follow these rules strictly so the bridge can reliably execute and iterate on yo
    */
   parseGeminiResponse(response) {
     try {
+      // Handle empty or null responses
+      if (!response || (typeof response === 'string' && response.trim() === '')) {
+        logger.warn('[Gemini Agent] Empty response from Gemini API');
+        return {
+          action: 'respond',
+          message: 'I received an empty response from the AI. Please try again.',
+        };
+      }
+      
       // Try to extract JSON from the response
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+        const parsed = JSON.parse(jsonMatch[0]);
+        // Validate parsed response has meaningful content
+        if (parsed.message && parsed.message.trim() === '' && parsed.action === 'respond') {
+          parsed.message = 'I received your message, but the response was empty. Please try again.';
+        }
+        return parsed;
       }
       
       // If no JSON found, treat as a direct response
@@ -309,9 +330,10 @@ Follow these rules strictly so the bridge can reliably execute and iterate on yo
       };
     } catch (error) {
       // If parsing fails, return as a message
+      logger.warn('[Gemini Agent] Failed to parse response:', error);
       return {
         action: 'respond',
-        message: response,
+        message: response || 'I encountered an error processing the response. Please try again.',
       };
     }
   }
@@ -561,12 +583,46 @@ Follow these rules strictly so the bridge can reliably execute and iterate on yo
         const toolResult = await this.executeTool(parsed.tool, parsed.args || {});
         
         if (toolResult.success) {
-          // Get Gemini to format the result into a user-friendly response
-          const resultPrompt = `The tool "${parsed.tool}" was executed successfully. Result: ${JSON.stringify(toolResult.result)}. Provide a helpful, user-friendly explanation of what was done.`;
-          const formattedResponse = await this.callGeminiAPI(resultPrompt, []);
-          finalResponse = formattedResponse;
+          // Build detailed response showing what was done
+          let stepDetails = `**Step executed:** ${parsed.tool}\n`;
+          
+          // Add arguments if available
+          if (parsed.args && Object.keys(parsed.args).length > 0) {
+            const argsSummary = Object.entries(parsed.args)
+              .map(([key, value]) => {
+                const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+                return `  - ${key}: ${valStr.length > 100 ? valStr.substring(0, 100) + '...' : valStr}`;
+              })
+              .join('\n');
+            stepDetails += `**Arguments:**\n${argsSummary}\n`;
+          }
+          
+          // Add reasoning if available
+          if (parsed.reasoning) {
+            stepDetails += `**Reasoning:** ${parsed.reasoning}\n`;
+          }
+          
+          // Add result summary
+          const resultStr = JSON.stringify(toolResult.result);
+          const resultSummary = resultStr.length > 200 ? resultStr.substring(0, 200) + '...' : resultStr;
+          stepDetails += `**Result:** ${resultSummary}\n`;
+          
+          // Try to get Gemini to format a user-friendly explanation, but always include the details
+          try {
+            const resultPrompt = `The tool "${parsed.tool}" was executed successfully. Result: ${JSON.stringify(toolResult.result)}. Provide a brief, user-friendly explanation (1-2 sentences) of what was done.`;
+            const formattedResponse = await this.callGeminiAPI(resultPrompt, []);
+            if (formattedResponse && formattedResponse.trim() !== '') {
+              finalResponse = `${formattedResponse}\n\n---\n${stepDetails}`;
+            } else {
+              finalResponse = stepDetails;
+            }
+          } catch (e) {
+            // If formatting fails, just use the detailed steps
+            logger.warn('[Gemini Agent] Failed to format tool result, using step details:', e);
+            finalResponse = stepDetails;
+          }
         } else {
-          finalResponse = `Failed to execute ${parsed.tool}: ${toolResult.error}. ${parsed.reasoning || ''}`;
+          finalResponse = `**Failed to execute:** ${parsed.tool}\n**Error:** ${toolResult.error}\n${parsed.reasoning ? `**Reasoning:** ${parsed.reasoning}` : ''}`;
         }
       } else if (parsed.action === 'chain_tools') {
         // Execute multiple tools in sequence
@@ -578,18 +634,42 @@ Follow these rules strictly so the bridge can reliably execute and iterate on yo
             success: toolResult.success,
             result: toolResult.result,
             error: toolResult.error,
+            args: toolCall.args,
           });
         }
 
-        // Format results
-        const resultsSummary = results.map(r => 
-          `${r.tool}: ${r.success ? 'Success' : `Failed - ${r.error}`}`
-        ).join('\n');
+        // Format detailed results showing all steps
+        const resultsDetails = results.map((r, idx) => {
+          let step = `**Step ${idx + 1}: ${r.tool}**\n`;
+          if (r.args && Object.keys(r.args).length > 0) {
+            const argsSummary = Object.entries(r.args)
+              .map(([key, value]) => {
+                const valStr = typeof value === 'string' ? value : JSON.stringify(value);
+                return `  - ${key}: ${valStr.length > 100 ? valStr.substring(0, 100) + '...' : valStr}`;
+              })
+              .join('\n');
+            step += `Arguments:\n${argsSummary}\n`;
+          }
+          if (r.success) {
+            const resultStr = JSON.stringify(r.result);
+            const resultSummary = resultStr.length > 200 ? resultStr.substring(0, 200) + '...' : resultStr;
+            step += `Result: ${resultSummary}`;
+          } else {
+            step += `Status: Failed\nError: ${r.error}`;
+          }
+          return step;
+        }).join('\n\n');
 
-        finalResponse = `Executed ${results.length} tool(s):\n${resultsSummary}\n\n${parsed.reasoning || ''}`;
+        finalResponse = `**Executed ${results.length} step(s):**\n\n${resultsDetails}\n\n${parsed.reasoning ? `**Reasoning:** ${parsed.reasoning}` : ''}`;
       } else {
         // Direct response
         finalResponse = parsed.message || geminiResponse;
+      }
+
+      // Ensure finalResponse is not empty
+      if (!finalResponse || (typeof finalResponse === 'string' && finalResponse.trim() === '')) {
+        logger.warn('[Gemini Agent] Empty response from Gemini, using fallback message');
+        finalResponse = 'I processed your request, but received an empty response. Please try rephrasing your message or check if the Gemini API is working correctly.';
       }
 
       // Add assistant response to history

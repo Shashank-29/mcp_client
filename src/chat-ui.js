@@ -57,10 +57,21 @@ class CopilotChatUI {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
         if (s.status === 'finished' || s.status === 'error') {
           clearInterval(iv);
-          const final = s.result || s.error || 'Session ended';
+          let final = s.result || s.error || 'Session ended';
+          // Ensure final is not empty
+          if (final && typeof final === 'object') {
+            const stringified = JSON.stringify(final);
+            if (stringified === '{}' || stringified === '[]' || stringified.trim() === '') {
+              final = s.status === 'finished' ? 'Task completed successfully.' : 'Task ended with an error.';
+            } else {
+              final = stringified;
+            }
+          } else if (!final || (typeof final === 'string' && final.trim() === '')) {
+            final = s.status === 'finished' ? 'Task completed successfully.' : 'Task ended with an error.';
+          }
           const finalMsg = document.createElement('div');
           finalMsg.className = 'chat-message chat-message-assistant';
-          finalMsg.innerHTML = `<div class="message-avatar">✅</div><div class="message-content">${this.formatMessage(JSON.stringify(final))}</div>`;
+          finalMsg.innerHTML = `<div class="message-avatar">${s.status === 'finished' ? '✅' : '❌'}</div><div class="message-content">${this.formatMessage(final)}</div>`;
           messagesContainer.appendChild(finalMsg);
           statusMsg.remove();
         }
@@ -71,12 +82,38 @@ class CopilotChatUI {
   }
 
   /**
+   * Clean up any empty message bubbles in the DOM
+   */
+  cleanupEmptyMessages() {
+    const messagesContainer = document.getElementById('chat-messages');
+    if (!messagesContainer) return;
+    
+    const messageElements = messagesContainer.querySelectorAll('.chat-message');
+    messageElements.forEach(msgEl => {
+      const contentDiv = msgEl.querySelector('.message-content');
+      if (contentDiv) {
+        const textContent = contentDiv.textContent || '';
+        const innerHTML = contentDiv.innerHTML || '';
+        // Check if content is effectively empty
+        if (textContent.trim() === '' && innerHTML.trim() === '') {
+          // Remove empty message bubbles
+          msgEl.remove();
+        } else if (textContent.trim() === '' && innerHTML.includes('(empty message)')) {
+          // Replace placeholder with helpful message
+          contentDiv.innerHTML = '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+        }
+      }
+    });
+  }
+
+  /**
    * Initialize the chat UI
    */
   init() {
     // Only initialize if not already initialized
     if (this.container && document.getElementById('mcp-copilot-chat')) {
-      // Already initialized, just ensure it's visible
+      // Already initialized, just ensure it's visible and clean up empty messages
+      this.cleanupEmptyMessages();
       this.show();
       return;
     }
@@ -85,6 +122,11 @@ class CopilotChatUI {
     this.loadMessages();
     this.setupEventListeners();
     this.getCurrentTabUrl();
+    
+    // Clean up any empty messages after a short delay to ensure DOM is ready
+    setTimeout(() => {
+      this.cleanupEmptyMessages();
+    }, 100);
     
     // Ensure chat is visible by default (but start hidden, show on first toggle)
     // Chat will be shown when user clicks toggle button
@@ -296,7 +338,16 @@ class CopilotChatUI {
       // Remove thinking indicator
       this.removeMessage(thinkingId);
       // Add assistant response or start session polling
-      this.addMessage({ role: 'assistant', content: response });
+      // Only add message if response is not empty
+      if (response && (typeof response === 'string' ? response.trim() !== '' : true)) {
+        this.addMessage({ role: 'assistant', content: response });
+      } else {
+        // If response is empty, show a helpful message
+        this.addMessage({ 
+          role: 'assistant', 
+          content: 'I received your message, but the response was empty. Please try again or check if the MCP bridge server is running correctly.' 
+        });
+      }
 
       // If response was a session start message containing 'Session started (id=', try to parse sessionId and poll
       try {
@@ -369,10 +420,20 @@ class CopilotChatUI {
 
         // If the bridge started a session object, prefer a human-friendly message
         if (response.session) {
-          return response.session.message || JSON.stringify(response.session);
+          const sessionMsg = response.session.message || JSON.stringify(response.session);
+          // Ensure session message is not empty
+          if (!sessionMsg || (typeof sessionMsg === 'string' && sessionMsg.trim() === '')) {
+            return 'Session started. Processing your request...';
+          }
+          return sessionMsg;
         }
 
-        return response.response;
+        // Ensure response is not empty
+        const responseText = response.response;
+        if (!responseText || (typeof responseText === 'string' && responseText.trim() === '')) {
+          return 'I received your message, but the response was empty. Please try again.';
+        }
+        return responseText;
       } else {
         return `Error: ${response.error || 'Unknown error occurred'}`;
       }
@@ -397,29 +458,77 @@ class CopilotChatUI {
    */
   addMessage(message) {
     const messagesContainer = document.getElementById('chat-messages');
-    const messageId = `msg-${Date.now()}-${Math.random()}`;
+    if (!messagesContainer) return null;
+    
+    // Validate message before proceeding
+    if (!message || !message.role) {
+      return null;
+    }
+    
+    // Ensure content is not empty (except for thinking indicators)
+    let content = message.content;
+    if (content === undefined || content === null) {
+      if (!message.thinking) {
+        // Don't add empty messages (except thinking indicators)
+        return null;
+      }
+      content = 'Thinking...';
+    } else if (typeof content === 'string' && content.trim() === '' && !message.thinking) {
+      // Don't add empty messages (except thinking indicators)
+      return null;
+    }
+    
+    const messageId = message.id || `msg-${Date.now()}-${Math.random()}`;
     
     const messageEl = document.createElement('div');
     messageEl.className = `chat-message chat-message-${message.role}`;
     messageEl.id = messageId;
     messageEl.dataset.messageId = messageId;
 
+    // Format the content and ensure it's not empty
+    const formattedContent = this.formatMessage(content);
+    
+    // Double-check that formatted content is not empty
+    if (!formattedContent || formattedContent.trim() === '' || formattedContent === '<span style="opacity: 0.6;">(empty message)</span>') {
+      if (!message.thinking) {
+        // Replace empty content with a helpful message
+        content = 'I received your message, but the response was empty. Please try again.';
+      }
+    }
+
     if (message.role === 'user') {
       messageEl.innerHTML = `
-        <div class="message-content">${this.formatMessage(message.content)}</div>
+        <div class="message-content">${this.formatMessage(content)}</div>
       `;
     } else {
       const icon = message.error ? '❌' : message.thinking ? '⏳' : '🤖';
       messageEl.innerHTML = `
         <div class="message-avatar">${icon}</div>
-        <div class="message-content">${this.formatMessage(message.content)}</div>
+        <div class="message-content">${this.formatMessage(content)}</div>
       `;
+    }
+
+    // Verify the content div was populated
+    const contentDiv = messageEl.querySelector('.message-content');
+    if (contentDiv && (!contentDiv.textContent || contentDiv.textContent.trim() === '')) {
+      if (!message.thinking) {
+        contentDiv.innerHTML = '<span style="opacity: 0.6;">Response was empty. Please try again.</span>';
+      }
     }
 
     messagesContainer.appendChild(messageEl);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 
-    this.messages.push({ ...message, id: messageId });
+    // Only save non-empty messages (except thinking indicators which are temporary)
+    if (!message.thinking) {
+      const existingIndex = this.messages.findIndex(m => m.id === messageId);
+      if (existingIndex >= 0) {
+        this.messages[existingIndex] = { ...message, id: messageId, content };
+      } else {
+        this.messages.push({ ...message, id: messageId, content });
+      }
+    }
+    
     return messageId;
   }
 
@@ -439,8 +548,16 @@ class CopilotChatUI {
    */
   formatMessage(content) {
     // Simple markdown formatting
-    if (content === undefined || content === null) content = '';
-    let formatted = String(content)
+    if (content === undefined || content === null) {
+      return '<span style="opacity: 0.6;">(empty message)</span>';
+    }
+    
+    const contentStr = String(content);
+    if (contentStr.trim() === '') {
+      return '<span style="opacity: 0.6;">(empty message)</span>';
+    }
+    
+    let formatted = contentStr
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/g, '<em>$1</em>')
       .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -487,6 +604,10 @@ class CopilotChatUI {
       this.container.classList.remove('minimized');
       // Bring to front
       this.container.style.zIndex = '2147483647';
+      // Clean up any empty messages when showing
+      setTimeout(() => {
+        this.cleanupEmptyMessages();
+      }, 50);
     }
   }
 
@@ -508,12 +629,19 @@ class CopilotChatUI {
     try {
       const result = await chrome.storage.local.get('chatMessages');
       if (result.chatMessages) {
-        this.messages = result.chatMessages;
+        // Filter out empty messages before restoring
+        this.messages = result.chatMessages.filter(msg => {
+          if (!msg.role) return false;
+          // Only include messages with valid non-empty content (except thinking indicators)
+          if (msg.thinking) return true;
+          const content = msg.content;
+          if (content === undefined || content === null) return false;
+          if (typeof content === 'string' && content.trim() === '') return false;
+          return true;
+        });
         // Restore messages in UI
         this.messages.forEach(msg => {
-          if (msg.role && msg.content) {
-            this.addMessage(msg);
-          }
+          this.addMessage(msg);
         });
       }
     } catch (error) {
